@@ -148,13 +148,32 @@ template CheckBitLength(b) {
     signal input in;
     signal output out;
 
-    // TODO
+    // Set `bits` to be an array of `b` bits, each constrainted to be either 0 or 1
+    signal bits[b];
+    for (var i = 0; i < b; i++) {
+        bits[i] <-- (in >> i) & 1;
+        bits[i] * (1 - bits[i]) === 0;
+    }
+
+    // Calculate the base-10 sum of the bit array
+    var sum_of_bits = 0;
+    for (var i = 0; i < b; i++) {
+        sum_of_bits += (2 ** i) * bits[i];
+    }
+
+    // Instead of constraining this sum to be equal to the input (as we might in Num2Bits), we
+    // set out to be a boolean value indicating whether this equality holds.
+    component eq = IsEqual();
+    eq.in[0] <== in;
+    eq.in[1] <== sum_of_bits;
+
+    out <== eq.out;
 }
 
 /*
  * Enforces the well-formedness of an exponent-mantissa pair (e, m), which is defined as follows:
  * if `e` is zero, then `m` must be zero
- * else, `e` must be at most `k` bits long, and `m` must be in the range [2^p, 2^p+1)
+ * elte, `e` must be at most `k` bits long, and `m` must be in the range [2^p, 2^p+1)
  */
 template CheckWellFormedness(k, p) {
     signal input e;
@@ -179,14 +198,14 @@ template CheckWellFormedness(k, p) {
     check_m_bits.in <== m - (1 << p);
 
     // choose the right checks based on `is_e_zero`
-    component if_else = IfThenElse();
-    if_else.cond <== is_e_zero.out;
-    if_else.L <== is_m_zero.out;
+    component if_elte = IfThenElse();
+    if_elte.cond <== is_e_zero.out;
+    if_elte.L <== is_m_zero.out;
     //// check_m_bits.out * check_e_bits.out is equivalent to check_m_bits.out AND check_e_bits.out
-    if_else.R <== check_m_bits.out * check_e_bits.out;
+    if_elte.R <== check_m_bits.out * check_e_bits.out;
 
     // assert that those checks passed
-    if_else.out === 1;
+    if_elte.out === 1;
 }
 
 /*
@@ -197,7 +216,19 @@ template RightShift(b, shift) {
     signal input x;
     signal output y;
 
-    // TODO
+    // Since shifting by `shift` bits is roughly equivalent to dividing by 2**shift (i.e. 1 << shift), we can
+    // represent the remainder of the the right shift as x mod (1 << shift)
+    signal rem <-- x % (1 << shift);
+
+    // Enforce that remainder is at most `shift` bits long
+    component num2bits = Num2Bits(shift);
+    num2bits.in <== rem;
+
+    // Remove remainder from `x` and divide by 2**shift to get the expected output y
+    y <-- (x - rem) / (1 << shift);
+
+    // To ensure correctness, constrain the inverse calculation of the above to be equivalent to `x`
+    x === y * (1 << shift) + rem;
 }
 
 /*
@@ -235,17 +266,17 @@ template RoundAndCheck(k, p, P) {
     var m_out_2 = (1 << p);
 
     // select right output based on no_overflow
-    component if_else[2];
+    component if_elte[2];
     for (var i = 0; i < 2; i++) {
-        if_else[i] = IfThenElse();
-        if_else[i].cond <== no_overflow;
+        if_elte[i] = IfThenElse();
+        if_elte[i].cond <== no_overflow;
     }
-    if_else[0].L <== e_out_1;
-    if_else[0].R <== e_out_2;
-    if_else[1].L <== m_out_1;
-    if_else[1].R <== m_out_2;
-    e_out <== if_else[0].out;
-    m_out <== if_else[1].out;
+    if_elte[0].L <== e_out_1;
+    if_elte[0].R <== e_out_2;
+    if_elte[1].L <== m_out_1;
+    if_elte[1].R <== m_out_2;
+    e_out <== if_elte[0].out;
+    m_out <== if_elte[1].out;
 }
 
 /*
@@ -259,7 +290,33 @@ template LeftShift(shift_bound) {
     signal input skip_checks;
     signal output y;
 
-    // TODO
+    // Enforce that 0 <= `shift` < `shift_bound`. Skip assertion if `skip_checks` is true.
+    assert(0 <= shift || skip_checks);
+    assert(shift < shift_bound || skip_checks);
+
+    // Ensure skip_checks is set to a binary value.
+    skip_checks * (1 - skip_checks) === 0;
+
+    signal accumulator[shift_bound + 1], tripwire[shift_bound + 1];
+    component equalt[shift_bound + 1];
+
+    accumulator[0] <== x;
+    tripwire[0] <== 1;
+
+    for (var i = 0; i < shift_bound; i++) {
+        // Set binary tripwire for accumulator
+        equalt[i] = IsEqual();
+        equalt[i].in[0] <== shift;
+        equalt[i].in[1] <== i;
+
+        // Zeroes out after hitting `shift`
+        tripwire[i + 1] <== tripwire[i] * (1 - equalt[i].out);
+
+        // Keep doubling until tripwire is tripped. After that, simply carry the value to the end.
+        accumulator[i + 1] <== accumulator[i] * (1 + tripwire[i+1]);
+    }
+
+    y <== accumulator[shift_bound];
 }
 
 /*
@@ -274,7 +331,46 @@ template MSNZB(b) {
     signal input skip_checks;
     signal output one_hot[b];
 
-    // TODO
+    // Assert that if the check is not being skipped, `in` is positive and non-zero
+    assert(skip_checks || in > 0);
+
+    // Ensure skip_checks is a binary value
+    skip_checks * (1 - skip_checks) === 0;
+
+    // Extract a boolean value (lt.out) that represents whether 0 is less than `in` (i.e. `in` >= 0)
+    component lt = LessThan(b);
+    lt.in[0] <== 0;
+    lt.in[1] <== in;
+
+    // Assert `in` >= 0 by constraining (1 - lt.out) to be zero.
+    // Note that we add the binary indicator `skip_checks` to the constraint to allow the constraint to be skipped.
+    0 === (1 - lt.out) * (1 - skip_checks);
+
+    // Convert b to bits to begin the MSNZB operation
+    component num_bits = Num2Bits(b);
+    num_bits.in <== in;
+
+    // We set a comparator that compares the ith bit of `in` with the (i+1)th bit of an accumulattrip.
+    // The accumulator serves as a tripwire that is set to 1 for all remaining values when the MSNZB is found.
+    component comparator[b];
+    signal accumulator[b+1];
+    accumulator[b] <== 0;
+    
+    // Iterate through the bits of `in` from MSB to ltB.
+    for (var i = b - 1; i >= 0; i--) {
+        comparator[i] = OR();
+        comparator[i].a <== num_bits.bits[i];
+        comparator[i].b <== accumulator[i+1];
+
+        // If the MSNZB has been found, this will always set to 1.
+        accumulator[i] <== comparator[i].out;
+    }
+
+    // At this point, our accumulator has accumulated an array of bits that are 1's up to the MSNZB and 0's after.
+    // Since our input is non-zero, we can assume that `accumulator` is not an array of all zeroes.
+    for (var i = 0; i < b; i++) {
+        one_hot[i] <== accumulator[i] - accumulator[i+1];
+    }
 }
 
 /*
@@ -292,7 +388,35 @@ template Normalize(k, p, P) {
     signal output m_out;
     assert(P > p);
 
-    // TODO
+    // Pull MSNZB of `m`. Since we already check validity of skip_checksin the MSNZB template, we can directly pass it in as a constraint.
+    component msnzb = MSNZB(P+1);
+    msnzb.in <== m;
+    msnzb.skip_checks <== skip_checks;
+    
+
+    // We set array lengths to P+2 to make space for the final carry bit.
+    signal mantissa_accumulator[P+2];
+    signal reverse_accumulator[P+2];
+
+    // Initialize accumulator values.
+    mantissa_accumulator[P+1] <== m;
+    reverse_accumulator[P+1] <== 1;
+
+    var precision_offset = P;
+    for (var i = P; i >= 0; i--) {
+        // Carries the 1 over until it hits the MSNZB. Sets remaining values to 0.
+        reverse_accumulator[i] <== (1 - msnzb.one_hot[i]) * reverse_accumulator[i + 1];
+
+        // Accumulate mantissa value until MSNZB, after which we carry the final value to index 0.
+        mantissa_accumulator[i] <== reverse_accumulator[i] * mantissa_accumulator[i + 1] + mantissa_accumulator[i + 1];
+
+        // Reduce precision offset for each bit leading up to MSNZB.
+        precision_offset -= reverse_accumulator[i];
+    }
+
+    // Set final exponent and mantissa values.
+    m_out <== mantissa_accumulator[0];
+    e_out <== e + precision_offset - p;
 }
 
 /*
@@ -308,5 +432,107 @@ template FloatAdd(k, p) {
     signal output e_out;
     signal output m_out;
 
-    // TODO
+    // Check that inputs are well-formed.
+    component is_well_formed[2];
+    for (var i = 0; i < 2; i++) {
+        is_well_formed[i] = CheckWellFormedness(k, p);
+        is_well_formed[i].e <== e[i];
+        is_well_formed[i].m <== m[i];
+    }
+
+    // 
+    signal e_left[2][p + 2];
+    signal magnitude[2];
+
+    // 
+    for (var i = 0; i < 2; i++) {
+        e_left[i][0] <== e[i];
+        for(var j = 0; j < p+1; j++) {
+            e_left[i][j+1] <== e_left[i][j]*2;
+        }
+        magnitude[i] <== e_left[i][p+1] + m[i];
+    }
+
+    component lt;
+    lt = LessThan((2 * p) + 2);
+    lt.in[0] <== magnitude[0];
+    lt.in[1] <== magnitude[1];
+    
+    // Set up switchers
+    component switcher[2];
+    signal alpha_e, alpha_m, beta_e, beta_m;
+    
+    // First switcher
+    switcher[0] = Switcher();
+    switcher[0].sel <== lt.out;
+    switcher[0].L <== e[0];
+    switcher[0].R <== e[1];
+    alpha_e <== switcher[0].outL;
+    beta_e <== switcher[0].outR;
+
+    // Second switcher
+    switcher[1] = Switcher();
+    switcher[1].sel <== lt.out;
+    switcher[1].L <== m[0];
+    switcher[1].R <== m[1];
+    alpha_m <== switcher[1].outL;
+    beta_m <== switcher[1].outR;
+
+    // Pull diff
+    signal diff <== alpha_e - beta_e;
+
+    // Set up components
+    signal m0;
+    signal e0;
+    signal m1;
+    signal e1;
+    signal m2;
+    signal e2;
+
+    // Bool for if precision + 1 is less than diff
+    component ltp = LessThan(p);
+    ltp.in[0] <== p + 1;
+    ltp.in[1] <== diff;
+
+    // Bool for if alpha_m is zero
+    component is_zero = IsZero();
+    is_zero.in <== alpha_e;
+
+    // Trips if either precision is less than diff or alpha_e is zero
+    component trip = OR();
+    trip.a <== ltp.out;
+    trip.b <== is_zero.out;
+
+    component leftshift = LeftShift(p+2);
+    leftshift.x <== alpha_m;
+    leftshift.shift <== diff;
+    leftshift.skip_checks <== trip.out;
+
+    m0 <== leftshift.y + beta_m;
+    e0 <== beta_e;
+
+    component normalize = Normalize(k, p, 2 * p+1);
+    normalize.e <== e0*(1 - trip.out);
+    normalize.m <== m0*(1 - trip.out);
+    normalize.skip_checks <== trip.out;
+    e1 <== normalize.e_out;
+    m1 <== normalize.m_out;
+
+    component round_and_check = RoundAndCheck(k, p, 2 * p+1);
+    round_and_check.e <== e1*(1-trip.out);
+    round_and_check.m <== m1*(1-trip.out);
+    e2 <== round_and_check.e_out;
+    m2 <== round_and_check.m_out;
+
+    component if_e = IfThenElse();
+    if_e.cond <== trip.out;
+    if_e.L <== alpha_e;
+    if_e.R <== e2;
+    e_out <== if_e.out;
+
+    component if_m = IfThenElse();
+    if_m.cond <== trip.out;
+    if_m.L <== alpha_m;
+    if_m.R <== m2;
+    m_out <== if_m.out;
 }
