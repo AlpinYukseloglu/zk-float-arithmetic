@@ -29,6 +29,7 @@ template OR() {
 
 /*
  * `out` = `cond` ? `L` : `R`
+ * This is functionally equivalent to `if (cond) { out = L; } else { out = R; }`
  */
 template IfThenElse() {
     signal input cond;
